@@ -463,3 +463,248 @@ fn parse_host_port(s: &str) -> Result<(String, u16), LazyMountError> {
         Ok((s.to_string(), 8090))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_parse_host_port_with_port() {
+        let (host, port) = parse_host_port("gpu.example.com:8090").unwrap();
+        assert_eq!(host, "gpu.example.com");
+        assert_eq!(port, 8090);
+    }
+
+    #[test]
+    fn test_parse_host_port_without_port() {
+        let (host, port) = parse_host_port("gpu.example.com").unwrap();
+        assert_eq!(host, "gpu.example.com");
+        assert_eq!(port, 8090); // default
+    }
+
+    #[test]
+    fn test_parse_host_port_custom_port() {
+        let (host, port) = parse_host_port("10.0.0.1:9999").unwrap();
+        assert_eq!(host, "10.0.0.1");
+        assert_eq!(port, 9999);
+    }
+
+    #[test]
+    fn test_parse_host_port_invalid_port() {
+        let result = parse_host_port("host:notaport");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_host_port_localhost() {
+        let (host, port) = parse_host_port("localhost:8090").unwrap();
+        assert_eq!(host, "localhost");
+        assert_eq!(port, 8090);
+    }
+
+    #[test]
+    fn test_cli_parse_server_start() {
+        let cli = Cli::try_parse_from(["lazymount", "server", "start"]).unwrap();
+        match cli.command {
+            Commands::Server { command: ServerCommands::Start { port, auth } } => {
+                assert_eq!(port, 8090);
+                assert!(auth.is_none());
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_server_start_with_args() {
+        let cli = Cli::try_parse_from([
+            "lazymount", "server", "start", "--port", "9000", "--auth", "user:pass",
+        ]).unwrap();
+        match cli.command {
+            Commands::Server { command: ServerCommands::Start { port, auth } } => {
+                assert_eq!(port, 9000);
+                assert_eq!(auth.as_deref(), Some("user:pass"));
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_server_stop() {
+        let cli = Cli::try_parse_from(["lazymount", "server", "stop"]).unwrap();
+        assert!(matches!(cli.command, Commands::Server { command: ServerCommands::Stop }));
+    }
+
+    #[test]
+    fn test_cli_parse_server_status() {
+        let cli = Cli::try_parse_from(["lazymount", "server", "status"]).unwrap();
+        assert!(matches!(cli.command, Commands::Server { command: ServerCommands::Status }));
+    }
+
+    #[test]
+    fn test_cli_parse_daemon_start() {
+        let cli = Cli::try_parse_from(["lazymount", "daemon", "start"]).unwrap();
+        match cli.command {
+            Commands::Daemon { command: DaemonCommands::Start { background } } => {
+                assert!(!background);
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_daemon_start_background() {
+        let cli = Cli::try_parse_from(["lazymount", "daemon", "start", "--background"]).unwrap();
+        match cli.command {
+            Commands::Daemon { command: DaemonCommands::Start { background } } => {
+                assert!(background);
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_remote_add() {
+        let cli = Cli::try_parse_from([
+            "lazymount", "remote", "add", "gpu-box", "gpu.example.com:8090", "--auth", "u:p",
+        ]).unwrap();
+        match cli.command {
+            Commands::Remote { command: RemoteCommands::Add { name, host_port, auth } } => {
+                assert_eq!(name, "gpu-box");
+                assert_eq!(host_port, "gpu.example.com:8090");
+                assert_eq!(auth.as_deref(), Some("u:p"));
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_remote_add_no_auth() {
+        let cli = Cli::try_parse_from([
+            "lazymount", "remote", "add", "dev", "dev.local:8090",
+        ]).unwrap();
+        match cli.command {
+            Commands::Remote { command: RemoteCommands::Add { name, auth, .. } } => {
+                assert_eq!(name, "dev");
+                assert!(auth.is_none());
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_remote_remove() {
+        let cli = Cli::try_parse_from(["lazymount", "remote", "remove", "gpu-box"]).unwrap();
+        match cli.command {
+            Commands::Remote { command: RemoteCommands::Remove { name } } => {
+                assert_eq!(name, "gpu-box");
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_remote_list() {
+        let cli = Cli::try_parse_from(["lazymount", "remote", "list"]).unwrap();
+        assert!(matches!(cli.command, Commands::Remote { command: RemoteCommands::List }));
+    }
+
+    #[test]
+    fn test_cli_parse_connect() {
+        let cli = Cli::try_parse_from(["lazymount", "connect", "gpu-box"]).unwrap();
+        match cli.command {
+            Commands::Connect { remote } => assert_eq!(remote, "gpu-box"),
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_disconnect() {
+        let cli = Cli::try_parse_from(["lazymount", "disconnect", "gpu-box"]).unwrap();
+        match cli.command {
+            Commands::Disconnect { remote } => assert_eq!(remote, "gpu-box"),
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_share_add() {
+        let cli = Cli::try_parse_from([
+            "lazymount", "share", "add", "project", "/home/user/code", "--remote", "gpu-box",
+        ]).unwrap();
+        match cli.command {
+            Commands::Share { command: ShareCommands::Add { name, path, remote } } => {
+                assert_eq!(name, "project");
+                assert_eq!(path, "/home/user/code");
+                assert_eq!(remote.as_deref(), Some("gpu-box"));
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_share_add_no_remote() {
+        let cli = Cli::try_parse_from([
+            "lazymount", "share", "add", "project", "/home/user/code",
+        ]).unwrap();
+        match cli.command {
+            Commands::Share { command: ShareCommands::Add { name, remote, .. } } => {
+                assert_eq!(name, "project");
+                assert!(remote.is_none());
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_share_remove() {
+        let cli = Cli::try_parse_from(["lazymount", "share", "remove", "project"]).unwrap();
+        match cli.command {
+            Commands::Share { command: ShareCommands::Remove { name } } => {
+                assert_eq!(name, "project");
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_share_list() {
+        let cli = Cli::try_parse_from(["lazymount", "share", "list"]).unwrap();
+        assert!(matches!(cli.command, Commands::Share { command: ShareCommands::List }));
+    }
+
+    #[test]
+    fn test_cli_parse_mounts() {
+        let cli = Cli::try_parse_from(["lazymount", "mounts"]).unwrap();
+        assert!(matches!(cli.command, Commands::Mounts { command: None }));
+    }
+
+    #[test]
+    fn test_cli_parse_mounts_stats() {
+        let cli = Cli::try_parse_from(["lazymount", "mounts", "stats", "project"]).unwrap();
+        match cli.command {
+            Commands::Mounts { command: Some(MountsCommands::Stats { share_name }) } => {
+                assert_eq!(share_name, "project");
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_status() {
+        let cli = Cli::try_parse_from(["lazymount", "status"]).unwrap();
+        assert!(matches!(cli.command, Commands::Status));
+    }
+
+    #[test]
+    fn test_cli_parse_no_args_fails() {
+        let result = Cli::try_parse_from(["lazymount"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cli_parse_unknown_command_fails() {
+        let result = Cli::try_parse_from(["lazymount", "unknown"]);
+        assert!(result.is_err());
+    }
+}

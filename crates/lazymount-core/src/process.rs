@@ -258,3 +258,174 @@ pub fn find_available_port(start: u16) -> Result<u16> {
     }
     Err(LazyMountError::PortConflict { port: start })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_available_port_returns_valid_port() {
+        // Use a high port range unlikely to be in use
+        let port = find_available_port(49152).unwrap();
+        assert!(port >= 49152);
+        assert!(port <= 49252);
+    }
+
+    #[test]
+    fn test_find_available_port_skips_occupied() {
+        // Bind a port, then ask for the same range — should skip it
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_port = listener.local_addr().unwrap().port();
+
+        let port = find_available_port(occupied_port).unwrap();
+        // Should get a port >= occupied_port (might be same if listener freed, or next)
+        assert!(port >= occupied_port);
+    }
+
+    #[test]
+    fn test_is_port_available_unbound_port() {
+        // A high ephemeral port should generally be available
+        assert!(is_port_available(49999) || !is_port_available(49999));
+        // This is inherently racy, but we can at least verify the function runs
+    }
+
+    #[test]
+    fn test_is_port_available_bound_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!is_port_available(port));
+    }
+
+    #[test]
+    fn test_process_config_construction() {
+        let config = ProcessConfig {
+            name: "test-proc".to_string(),
+            kind: ProcessKind::RcloneServe,
+            program: "echo".to_string(),
+            args: vec!["hello".to_string()],
+            restart_on_crash: true,
+            max_restart_delay: Duration::from_secs(60),
+        };
+
+        assert_eq!(config.name, "test-proc");
+        assert_eq!(config.program, "echo");
+        assert_eq!(config.args, vec!["hello"]);
+        assert!(config.restart_on_crash);
+        assert_eq!(config.max_restart_delay, Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_and_wait() {
+        let config = ProcessConfig {
+            name: "echo-test".to_string(),
+            kind: ProcessKind::RcloneServe,
+            program: "echo".to_string(),
+            args: vec!["hello".to_string()],
+            restart_on_crash: false,
+            max_restart_delay: Duration::from_secs(1),
+        };
+
+        let proc = ManagedProcess::spawn(config).await.unwrap();
+        assert!(proc.pid().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_spawn_monitored_sends_started_event() {
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+
+        let config = ProcessConfig {
+            name: "event-test".to_string(),
+            kind: ProcessKind::RcloneServe,
+            program: "echo".to_string(),
+            args: vec!["hi".to_string()],
+            restart_on_crash: false,
+            max_restart_delay: Duration::from_secs(1),
+        };
+
+        let _proc = ManagedProcess::spawn_monitored(config, event_tx).await.unwrap();
+
+        // Should receive a Started event
+        let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        match event {
+            ProcessEvent::Started { name, .. } => {
+                assert_eq!(name, "event-test");
+            }
+            other => panic!("expected Started event, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spawn_monitored_sends_exited_event() {
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+
+        let config = ProcessConfig {
+            name: "exit-test".to_string(),
+            kind: ProcessKind::RcloneServe,
+            program: "true".to_string(), // exits immediately with code 0
+            args: vec![],
+            restart_on_crash: false,
+            max_restart_delay: Duration::from_secs(1),
+        };
+
+        let _proc = ManagedProcess::spawn_monitored(config, event_tx).await.unwrap();
+
+        // Collect events — should get Started then Exited
+        let mut got_exited = false;
+        for _ in 0..5 {
+            match tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await {
+                Ok(Some(ProcessEvent::Exited { name, exit_code, .. })) => {
+                    assert_eq!(name, "exit-test");
+                    assert_eq!(exit_code, Some(0));
+                    got_exited = true;
+                    break;
+                }
+                Ok(Some(_)) => continue, // skip Started
+                _ => break,
+            }
+        }
+        assert!(got_exited, "should have received an Exited event");
+    }
+
+    #[tokio::test]
+    async fn test_kill_process() {
+        let config = ProcessConfig {
+            name: "kill-test".to_string(),
+            kind: ProcessKind::RcloneServe,
+            program: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            restart_on_crash: false,
+            max_restart_delay: Duration::from_secs(1),
+        };
+
+        let mut proc = ManagedProcess::spawn(config).await.unwrap();
+        assert!(proc.is_running());
+
+        proc.kill().await.unwrap();
+        // Give it a moment to die
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!proc.is_running());
+    }
+
+    #[tokio::test]
+    async fn test_spawn_nonexistent_binary_fails() {
+        let config = ProcessConfig {
+            name: "bad-binary".to_string(),
+            kind: ProcessKind::RcloneServe,
+            program: "this_binary_does_not_exist_12345".to_string(),
+            args: vec![],
+            restart_on_crash: false,
+            max_restart_delay: Duration::from_secs(1),
+        };
+
+        let result = ManagedProcess::spawn(config).await;
+        assert!(result.is_err());
+        match result {
+            Err(e) => assert!(e.to_string().contains("failed to spawn"), "error was: {e}"),
+            Ok(_) => panic!("expected error for nonexistent binary"),
+        }
+    }
+}

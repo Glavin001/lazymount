@@ -115,3 +115,57 @@ impl RcloneRcClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rclone_rc_client_base_url() {
+        let client = RcloneRcClient::new(5572);
+        assert_eq!(client.base_url, "http://127.0.0.1:5572");
+    }
+
+    #[test]
+    fn test_rclone_rc_client_different_ports() {
+        let client1 = RcloneRcClient::new(5572);
+        let client2 = RcloneRcClient::new(5573);
+        assert_eq!(client1.base_url, "http://127.0.0.1:5572");
+        assert_eq!(client2.base_url, "http://127.0.0.1:5573");
+    }
+
+    #[tokio::test]
+    async fn test_health_check_no_server() {
+        // No rclone RC server running — should return false, not panic
+        let client = RcloneRcClient::new(59999);
+        assert!(!client.health_check().await);
+    }
+
+    #[tokio::test]
+    async fn test_get_vfs_stats_no_server() {
+        let client = RcloneRcClient::new(59998);
+        let result = client.get_vfs_stats().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_transfer_stats_no_server() {
+        let client = RcloneRcClient::new(59997);
+        let result = client.get_transfer_stats().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_unmount_no_server() {
+        let client = RcloneRcClient::new(59996);
+        let result = client.unmount().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_forget_cache_no_server() {
+        let client = RcloneRcClient::new(59995);
+        let result = client.forget_cache(Some("/test")).await;
+        assert!(result.is_err());
+    }
+}

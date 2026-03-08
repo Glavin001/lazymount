@@ -308,3 +308,143 @@ fn format_bytes(bytes: u64) -> String {
         format!("{bytes} B")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
+        assert_eq!(format_bytes(2_500_000_000), "2.3 GB");
+    }
+
+    #[test]
+    fn test_format_bytes_large_values() {
+        assert_eq!(format_bytes(10 * 1024 * 1024 * 1024), "10.0 GB");
+        assert_eq!(format_bytes(156 * 1024 * 1024), "156.0 MB");
+    }
+
+    #[tokio::test]
+    async fn test_handle_server_request_status() {
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let cache_base = std::path::PathBuf::from("/tmp/lazymount-test-cache");
+        let mm = Arc::new(Mutex::new(MountManager::new(
+            "/tmp/lazymount-test",
+            crate::config::CacheConfig::default(),
+            cache_base,
+            5572,
+            event_tx,
+        )));
+
+        let resp = handle_server_request(ControlRequest::Status, &mm).await;
+        match resp {
+            ControlResponse::Status { role, running, .. } => {
+                assert_eq!(role, "server");
+                assert!(running);
+            }
+            _ => panic!("expected Status response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_server_request_mount_list_empty() {
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let cache_base = std::path::PathBuf::from("/tmp/lazymount-test-cache");
+        let mm = Arc::new(Mutex::new(MountManager::new(
+            "/tmp/lazymount-test",
+            crate::config::CacheConfig::default(),
+            cache_base,
+            5572,
+            event_tx,
+        )));
+
+        let resp = handle_server_request(ControlRequest::MountList, &mm).await;
+        match resp {
+            ControlResponse::MountList { mounts } => {
+                assert!(mounts.is_empty());
+            }
+            _ => panic!("expected MountList response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_server_request_mount_stats_not_found() {
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let cache_base = std::path::PathBuf::from("/tmp/lazymount-test-cache");
+        let mm = Arc::new(Mutex::new(MountManager::new(
+            "/tmp/lazymount-test",
+            crate::config::CacheConfig::default(),
+            cache_base,
+            5572,
+            event_tx,
+        )));
+
+        let resp = handle_server_request(
+            ControlRequest::MountStats {
+                share_name: "nonexistent".to_string(),
+            },
+            &mm,
+        )
+        .await;
+
+        match resp {
+            ControlResponse::Error { message } => {
+                assert!(message.contains("not found"));
+            }
+            _ => panic!("expected Error response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_server_request_unsupported_command() {
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let cache_base = std::path::PathBuf::from("/tmp/lazymount-test-cache");
+        let mm = Arc::new(Mutex::new(MountManager::new(
+            "/tmp/lazymount-test",
+            crate::config::CacheConfig::default(),
+            cache_base,
+            5572,
+            event_tx,
+        )));
+
+        let resp = handle_server_request(
+            ControlRequest::ShareAdd {
+                name: "x".into(),
+                path: "/x".into(),
+                remote: None,
+            },
+            &mm,
+        )
+        .await;
+
+        match resp {
+            ControlResponse::Error { message } => {
+                assert!(message.contains("not supported"));
+            }
+            _ => panic!("expected Error response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_server_request_shutdown() {
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let cache_base = std::path::PathBuf::from("/tmp/lazymount-test-cache");
+        let mm = Arc::new(Mutex::new(MountManager::new(
+            "/tmp/lazymount-test",
+            crate::config::CacheConfig::default(),
+            cache_base,
+            5572,
+            event_tx,
+        )));
+
+        let resp = handle_server_request(ControlRequest::Shutdown, &mm).await;
+        assert!(matches!(resp, ControlResponse::Ok));
+    }
+}

@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+
+      - name: Install chisel
+        run: |
+          CHISEL_VERSION=$(curl -fsSL https://api.github.com/repos/jpillora/chisel/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+          curl -fsSL "https://github.com/jpillora/chisel/releases/download/v${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_amd64.gz" | gunzip > /tmp/chisel
+          chmod +x /tmp/chisel
+          sudo mv /tmp/chisel /usr/local/bin/chisel
+
+      - name: Verify dependencies
+        run: |
+          rclone version
+          chisel --version
+
+      - name: Build
+        run: cargo build --all-targets
+
+      - name: Run tests
+        run: cargo test -- --test-threads=1
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings

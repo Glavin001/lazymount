@@ -230,3 +230,174 @@ impl std::fmt::Display for MountStatus {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connection_status_display() {
+        assert_eq!(ConnectionStatus::Disconnected.to_string(), "disconnected");
+        assert_eq!(ConnectionStatus::Connecting.to_string(), "connecting");
+        assert_eq!(ConnectionStatus::Connected.to_string(), "connected");
+        assert_eq!(
+            ConnectionStatus::Reconnecting {
+                since: Instant::now(),
+                attempts: 3
+            }
+            .to_string(),
+            "reconnecting (attempt 3)"
+        );
+        assert_eq!(
+            ConnectionStatus::Error("timeout".to_string()).to_string(),
+            "error: timeout"
+        );
+    }
+
+    #[test]
+    fn test_share_status_display() {
+        assert_eq!(ShareStatus::Stopped.to_string(), "stopped");
+        assert_eq!(ShareStatus::Starting.to_string(), "starting");
+        assert_eq!(ShareStatus::Serving.to_string(), "serving");
+        assert_eq!(
+            ShareStatus::Error("port in use".to_string()).to_string(),
+            "error: port in use"
+        );
+    }
+
+    #[test]
+    fn test_mount_status_display() {
+        assert_eq!(MountStatus::Discovered.to_string(), "discovered");
+        assert_eq!(MountStatus::Mounting.to_string(), "mounting");
+        assert_eq!(MountStatus::Mounted.to_string(), "mounted");
+        assert_eq!(MountStatus::Unmounting.to_string(), "unmounting");
+        assert_eq!(
+            MountStatus::Stale {
+                since: Instant::now()
+            }
+            .to_string(),
+            "stale"
+        );
+        assert_eq!(
+            MountStatus::Error("fuse error".to_string()).to_string(),
+            "error: fuse error"
+        );
+    }
+
+    #[test]
+    fn test_connection_status_default() {
+        let status = ConnectionStatus::default();
+        assert!(matches!(status, ConnectionStatus::Disconnected));
+    }
+
+    #[test]
+    fn test_share_status_default() {
+        let status = ShareStatus::default();
+        assert!(matches!(status, ShareStatus::Stopped));
+    }
+
+    #[test]
+    fn test_mount_status_default() {
+        let status = MountStatus::default();
+        assert!(matches!(status, MountStatus::Discovered));
+    }
+
+    #[test]
+    fn test_error_display() {
+        let err = LazyMountError::Config("bad toml".to_string());
+        assert_eq!(err.to_string(), "configuration error: bad toml");
+
+        let err = LazyMountError::DependencyMissing {
+            binary: "chisel".to_string(),
+            install_hint: "install from github".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "dependency missing: chisel — install from github"
+        );
+
+        let err = LazyMountError::PortConflict { port: 8090 };
+        assert_eq!(err.to_string(), "port conflict: port 8090 is already in use");
+    }
+
+    #[test]
+    fn test_tunnel_mapping() {
+        let mapping = TunnelMapping {
+            local_port: 2222,
+            remote_port: 3222,
+        };
+        assert_eq!(mapping.local_port, 2222);
+        assert_eq!(mapping.remote_port, 3222);
+    }
+
+    #[test]
+    fn test_mount_stats_default() {
+        let stats = MountStats::default();
+        assert_eq!(stats.cache_size_bytes, 0);
+        assert_eq!(stats.cached_files, 0);
+        assert_eq!(stats.bytes_transferred, 0);
+        assert_eq!(stats.transfer_speed_bytes_per_sec, 0.0);
+    }
+
+    #[test]
+    fn test_mount_stats_serialization() {
+        let stats = MountStats {
+            cache_size_bytes: 1024,
+            cached_files: 5,
+            bytes_transferred: 2048,
+            transfer_speed_bytes_per_sec: 100.5,
+        };
+
+        let json = serde_json::to_string(&stats).unwrap();
+        let parsed: MountStats = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.cache_size_bytes, 1024);
+        assert_eq!(parsed.cached_files, 5);
+        assert_eq!(parsed.bytes_transferred, 2048);
+        assert!((parsed.transfer_speed_bytes_per_sec - 100.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_remote_serialization() {
+        let remote = Remote {
+            name: "gpu-box".to_string(),
+            host: "gpu.example.com".to_string(),
+            port: 8090,
+            auth: Some("user:pass".to_string()),
+            auto_connect: true,
+            status: ConnectionStatus::Connected,
+        };
+
+        let json = serde_json::to_string(&remote).unwrap();
+        let parsed: Remote = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.name, "gpu-box");
+        assert_eq!(parsed.host, "gpu.example.com");
+        assert_eq!(parsed.port, 8090);
+        assert_eq!(parsed.auth.as_deref(), Some("user:pass"));
+        assert!(parsed.auto_connect);
+        // status is #[serde(skip)] so it should be default (Disconnected)
+        assert!(matches!(parsed.status, ConnectionStatus::Disconnected));
+    }
+
+    #[test]
+    fn test_share_serialization() {
+        let share = Share {
+            name: "project".to_string(),
+            path: PathBuf::from("/home/user/code"),
+            sftp_port: 2222,
+            remotes: vec!["gpu-box".to_string()],
+            status: ShareStatus::Serving,
+        };
+
+        let json = serde_json::to_string(&share).unwrap();
+        let parsed: Share = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.name, "project");
+        assert_eq!(parsed.path, PathBuf::from("/home/user/code"));
+        assert_eq!(parsed.sftp_port, 2222);
+        assert_eq!(parsed.remotes, vec!["gpu-box"]);
+        // status is #[serde(skip)] so it should be default (Stopped)
+        assert!(matches!(parsed.status, ShareStatus::Stopped));
+    }
+}
