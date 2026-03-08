@@ -70,13 +70,18 @@ async fn test_rclone_serve_sftp_starts_and_stops() {
         other => panic!("expected Started, got {:?}", other),
     }
 
-    // Give rclone a moment to bind the port
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Verify the port is now in use (rclone is listening)
+    // Poll for rclone to bind the port
+    let mut bound = false;
+    for _ in 0..20 {
+        if !lazymount_core::process::is_port_available(share.sftp_port) {
+            bound = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
     assert!(
-        !lazymount_core::process::is_port_available(share.sftp_port),
-        "rclone should be listening on port {}",
+        bound,
+        "rclone should be listening on port {} within 10s",
         share.sftp_port
     );
 
@@ -89,10 +94,17 @@ async fn test_rclone_serve_sftp_starts_and_stops() {
     share_manager.remove_share("test-share").await.unwrap();
     assert!(share_manager.list_shares().is_empty());
 
-    // Port should be freed after a moment
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Poll for port to be freed
+    let mut freed = false;
+    for _ in 0..20 {
+        if lazymount_core::process::is_port_available(share.sftp_port) {
+            freed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
     assert!(
-        lazymount_core::process::is_port_available(share.sftp_port),
+        freed,
         "port should be freed after stopping rclone"
     );
 }
@@ -214,13 +226,18 @@ async fn test_rclone_rc_api_health_check() {
         .spawn()
         .unwrap();
 
-    // Wait for rclone to start
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
     let rc_client = lazymount_core::rclone_rc::RcloneRcClient::new(rc_port);
 
-    // Health check should succeed
-    assert!(rc_client.health_check().await, "rclone RC health check should pass");
+    // Poll for rclone RC to become available
+    let mut healthy = false;
+    for _ in 0..20 {
+        if rc_client.health_check().await {
+            healthy = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(healthy, "rclone RC health check should pass within 10s");
 
     // Clean up
     child.kill().await.ok();
@@ -269,14 +286,16 @@ async fn test_chisel_server_starts() {
         other => panic!("expected Started, got {:?}", other),
     }
 
-    // Give chisel a moment to bind
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Port should be in use
-    assert!(
-        !lazymount_core::process::is_port_available(19090),
-        "chisel should be listening on port 19090"
-    );
+    // Poll for chisel to bind the port
+    let mut bound = false;
+    for _ in 0..20 {
+        if !lazymount_core::process::is_port_available(19090) {
+            bound = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(bound, "chisel should be listening on port 19090 within 10s");
 
     // Clean up
     handle.process.kill().await.ok();
@@ -311,9 +330,14 @@ async fn test_chisel_client_connects_to_server() {
     .await
     .unwrap();
 
-    // Wait for server to start
+    // Wait for server to start and bind port
     let _ = tokio::time::timeout(Duration::from_secs(5), server_rx.recv()).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    for _ in 0..20 {
+        if !lazymount_core::process::is_port_available(19091) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 
     // Connect client with a reverse tunnel
     let remote = lazymount_core::types::Remote {
@@ -402,9 +426,14 @@ async fn test_end_to_end_rclone_serve_through_chisel_tunnel() {
     .await
     .unwrap();
 
-    // Wait for chisel server
+    // Wait for chisel server to bind port
     let _ = tokio::time::timeout(Duration::from_secs(5), server_rx.recv()).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    for _ in 0..20 {
+        if !lazymount_core::process::is_port_available(chisel_port) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 
     // 3. Start chisel client with reverse tunnel: remote:tunneled_port -> local:sftp_port
     let tunneled_port: u16 = 19923;
@@ -432,17 +461,22 @@ async fn test_end_to_end_rclone_serve_through_chisel_tunnel() {
     .await
     .unwrap();
 
-    // Wait for tunnel to establish
+    // Wait for tunnel to establish — poll instead of fixed sleep
     let _ = tokio::time::timeout(Duration::from_secs(5), client_rx.recv()).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // 4. Verify: the tunneled port should now forward to the rclone SFTP server
-    //    We can't easily mount (needs FUSE), but we can verify the tunnel is up
-    //    by checking that the tunneled port is now in use
-    let tunnel_active = !lazymount_core::process::is_port_available(tunneled_port);
+    //    Poll for the tunnel port to become active (chisel needs time to establish)
+    let mut tunnel_active = false;
+    for _ in 0..20 {
+        if !lazymount_core::process::is_port_available(tunneled_port) {
+            tunnel_active = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
     assert!(
         tunnel_active,
-        "tunneled port {} should be in use (chisel forwarding)",
+        "tunneled port {} should be in use (chisel forwarding) after 10s",
         tunneled_port,
     );
 
