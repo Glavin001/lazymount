@@ -294,9 +294,10 @@ async fn test_rclone_serve_and_client_e2e() {
             "--sftp-user", "anonymous",
             "--sftp-pass", "", // --no-auth on the server
             "--no-check-certificate",
-            "--sftp-key-use-agent=false",
+            "--sftp-key-use-agent", "false",
             "--sftp-shell-type", "none",
         ])
+        .env("SSH_AUTH_SOCK", "") // Prevent ssh-agent lookup in CI
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
@@ -326,9 +327,10 @@ async fn test_rclone_serve_and_client_e2e() {
             "--sftp-user", "anonymous",
             "--sftp-pass", "",
             "--no-check-certificate",
-            "--sftp-key-use-agent=false",
+            "--sftp-key-use-agent", "false",
             "--sftp-shell-type", "none",
         ])
+        .env("SSH_AUTH_SOCK", "") // Prevent ssh-agent lookup in CI
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
