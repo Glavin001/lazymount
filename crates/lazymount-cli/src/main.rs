@@ -386,8 +386,8 @@ fn print_response(resp: &ControlResponse) {
                 return;
             }
             println!(
-                "{:<15} {:<30} {}",
-                "NAME", "HOST", "STATUS"
+                "{:<15} {:<30} STATUS",
+                "NAME", "HOST"
             );
             for r in remotes {
                 println!(
@@ -404,8 +404,8 @@ fn print_response(resp: &ControlResponse) {
                 return;
             }
             println!(
-                "{:<15} {:<30} {:<15} {}",
-                "NAME", "PATH", "REMOTES", "STATUS"
+                "{:<15} {:<30} {:<15} STATUS",
+                "NAME", "PATH", "REMOTES"
             );
             for s in shares {
                 let remotes = if s.remotes.is_empty() {
@@ -425,8 +425,8 @@ fn print_response(resp: &ControlResponse) {
                 return;
             }
             println!(
-                "{:<15} {:<15} {:<30} {:<10} {}",
-                "CLIENT", "SHARE", "LOCAL PATH", "CACHE", "STATUS"
+                "{:<15} {:<15} {:<30} {:<10} STATUS",
+                "CLIENT", "SHARE", "LOCAL PATH", "CACHE"
             );
             for m in mounts {
                 println!(
