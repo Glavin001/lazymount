@@ -54,6 +54,8 @@ jobs:
 
       - name: Run tests
         run: cargo test -- --test-threads=1
+        env:
+          SSH_AUTH_SOCK: ""
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings

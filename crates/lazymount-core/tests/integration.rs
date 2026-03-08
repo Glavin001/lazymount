@@ -36,7 +36,7 @@ fn create_test_files() -> tempfile::TempDir {
 #[tokio::test]
 async fn test_rclone_serve_sftp_starts_and_stops() {
     if !has_binary("rclone") {
-        eprintln!("SKIP: rclone not found");
+        println!("SKIP: rclone not found");
         return;
     }
 
@@ -112,7 +112,7 @@ async fn test_rclone_serve_sftp_starts_and_stops() {
 #[tokio::test]
 async fn test_rclone_serve_multiple_shares() {
     if !has_binary("rclone") {
-        eprintln!("SKIP: rclone not found");
+        println!("SKIP: rclone not found");
         return;
     }
 
@@ -145,7 +145,7 @@ async fn test_rclone_serve_multiple_shares() {
 #[tokio::test]
 async fn test_rclone_serve_duplicate_share_name_fails() {
     if !has_binary("rclone") {
-        eprintln!("SKIP: rclone not found");
+        println!("SKIP: rclone not found");
         return;
     }
 
@@ -171,7 +171,7 @@ async fn test_rclone_serve_duplicate_share_name_fails() {
 #[tokio::test]
 async fn test_rclone_serve_nonexistent_path_fails() {
     if !has_binary("rclone") {
-        eprintln!("SKIP: rclone not found");
+        println!("SKIP: rclone not found");
         return;
     }
 
@@ -196,7 +196,7 @@ async fn test_rclone_serve_nonexistent_path_fails() {
 #[tokio::test]
 async fn test_rclone_rc_api_health_check() {
     if !has_binary("rclone") {
-        eprintln!("SKIP: rclone not found");
+        println!("SKIP: rclone not found");
         return;
     }
 
@@ -253,7 +253,7 @@ async fn test_rclone_rc_api_health_check() {
 #[tokio::test]
 async fn test_rclone_serve_and_client_e2e() {
     if !has_binary("rclone") {
-        eprintln!("SKIP: rclone not found");
+        println!("SKIP: rclone not found");
         return;
     }
 
@@ -357,7 +357,7 @@ async fn test_rclone_serve_and_client_e2e() {
 #[tokio::test]
 async fn test_chisel_server_starts() {
     if !has_binary("chisel") {
-        eprintln!("SKIP: chisel not found");
+        println!("SKIP: chisel not found");
         return;
     }
 
@@ -411,7 +411,7 @@ async fn test_chisel_server_starts() {
 #[tokio::test]
 async fn test_chisel_client_connects_to_server() {
     if !has_binary("chisel") {
-        eprintln!("SKIP: chisel not found");
+        println!("SKIP: chisel not found");
         return;
     }
 
@@ -496,7 +496,7 @@ async fn test_chisel_client_connects_to_server() {
 #[tokio::test]
 async fn test_end_to_end_rclone_serve_through_chisel_tunnel() {
     if !has_binary("rclone") || !has_binary("chisel") {
-        eprintln!("SKIP: rclone and/or chisel not found");
+        println!("SKIP: rclone and/or chisel not found");
         return;
     }
 
