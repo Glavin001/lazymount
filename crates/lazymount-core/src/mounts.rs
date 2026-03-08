@@ -69,9 +69,11 @@ impl MountManager {
         std::fs::create_dir_all(&cache_dir)?;
 
         let sftp_remote = format!(
-            ":sftp,host=localhost,port={},no_check=true:",
+            ":sftp,host=localhost,port={},no_check=true,key_use_agent=false,shell_type=none:",
             tunneled_port
         );
+
+        let obscured_pass = obscure_password("anonymous")?;
 
         let proc_config = ProcessConfig {
             name: format!("rclone-mount-{share_name}"),
@@ -81,6 +83,10 @@ impl MountManager {
                 "mount".to_string(),
                 sftp_remote,
                 mount_point.to_string_lossy().to_string(),
+                "--sftp-user".to_string(),
+                "anonymous".to_string(),
+                "--sftp-pass".to_string(),
+                obscured_pass,
                 "--vfs-cache-mode".to_string(),
                 self.cache_config.vfs_cache_mode.clone(),
                 "--vfs-cache-max-age".to_string(),
@@ -102,6 +108,7 @@ impl MountManager {
             ],
             restart_on_crash: true,
             max_restart_delay: Duration::from_secs(60),
+            env_remove: vec!["SSH_AUTH_SOCK".to_string()],
         };
 
         let process =
@@ -219,6 +226,25 @@ impl MountManager {
             }
         }
     }
+}
+
+/// Generate an rclone-obscured password via `rclone obscure`.
+/// The rclone SFTP backend requires passwords to be obscured even for
+/// no-auth servers; this prevents it from falling back to SSH agent auth.
+fn obscure_password(password: &str) -> Result<String> {
+    let output = std::process::Command::new("rclone")
+        .args(["obscure", password])
+        .output()
+        .map_err(|e| LazyMountError::Process(format!("failed to run rclone obscure: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(LazyMountError::Process(format!(
+            "rclone obscure failed: {stderr}"
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Try system unmount command as a fallback.

@@ -22,11 +22,6 @@ Standard commands from CI (`.github/workflows/ci.yml`):
 - `libssl-dev` and `pkg-config` are needed at build time (OpenSSL sys crate).
 - Rust stable ≥ 1.85 is required (transitive dependency `getrandom` 0.4 uses edition 2024). The VM default may be older; run `rustup default stable && rustup update stable` if builds fail on edition2024.
 
-### Known bugs (as of rclone 1.73.2 / chisel 1.11.4)
-
-- **Chisel auth in URL**: `tunnel.rs` embeds auth in the URL (`http://user:pass@host:port`) but chisel 1.11.4 rejects this as "malformed ws or wss URL." Fix: use `--auth user:pass` as a separate CLI flag.
-- **rclone mount SSH agent**: `mounts.rs` constructs the rclone mount command without `--sftp-key-use-agent=false`, `--sftp-user`, or `--sftp-pass`. rclone 1.73.2 always attempts SSH agent connection, causing the mount to fail. The integration tests work around this correctly (see `test_rclone_serve_and_client_e2e`).
-
 ### End-to-end testing with Docker
 
 A realistic E2E test can be done using Docker as the "remote server":

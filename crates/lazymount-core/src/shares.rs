@@ -68,6 +68,7 @@ impl ShareManager {
             ],
             restart_on_crash: true,
             max_restart_delay: Duration::from_secs(60),
+            env_remove: vec![],
         };
 
         let process =
