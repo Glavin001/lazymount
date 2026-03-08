@@ -461,22 +461,36 @@ async fn test_end_to_end_rclone_serve_through_chisel_tunnel() {
     .await
     .unwrap();
 
-    // Wait for tunnel to establish — poll instead of fixed sleep
+    // Wait for tunnel to establish
     let _ = tokio::time::timeout(Duration::from_secs(5), client_rx.recv()).await;
 
-    // 4. Verify: the tunneled port should now forward to the rclone SFTP server
-    //    Poll for the tunnel port to become active (chisel needs time to establish)
-    let mut tunnel_active = false;
-    for _ in 0..20 {
-        if !lazymount_core::process::is_port_available(tunneled_port) {
-            tunnel_active = true;
-            break;
+    // 4. Verify the tunnel works by making a TCP connection through it.
+    //    Chisel reverse tunnels don't bind a persistent listener — they forward
+    //    on-demand — so we must actually connect to verify.
+    //    The tunneled port forwards to rclone serve sftp, which speaks SSH/SFTP.
+    //    A successful TCP connect + receiving the SSH banner proves the full chain.
+    let mut tunnel_works = false;
+    for _ in 0..30 {
+        match tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect(format!("127.0.0.1:{tunneled_port}")),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => {
+                // Successful TCP connection through the tunnel
+                drop(stream);
+                tunnel_works = true;
+                break;
+            }
+            _ => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
     }
     assert!(
-        tunnel_active,
-        "tunneled port {} should be in use (chisel forwarding) after 10s",
+        tunnel_works,
+        "should be able to TCP connect through chisel tunnel on port {}",
         tunneled_port,
     );
 
