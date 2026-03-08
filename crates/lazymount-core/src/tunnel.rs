@@ -84,6 +84,7 @@ impl TunnelProvider for ChiselTunnelProvider {
             args,
             restart_on_crash: true,
             max_restart_delay: Duration::from_secs(60),
+            env_remove: vec![],
         };
 
         let process = ManagedProcess::spawn_monitored(proc_config, event_tx).await?;
@@ -149,14 +150,16 @@ async fn spawn_chisel_client(
     tunnels: &[TunnelMapping],
     event_tx: mpsc::Sender<ProcessEvent>,
 ) -> Result<ManagedProcess> {
-    // Build the server URL with optional auth
-    let url = if let Some(ref auth) = remote.auth {
-        format!("http://{}@{}:{}", auth, remote.host, remote.port)
-    } else {
-        format!("http://{}:{}", remote.host, remote.port)
-    };
+    let url = format!("http://{}:{}", remote.host, remote.port);
 
-    let mut args = vec!["client".to_string(), url];
+    let mut args = vec!["client".to_string()];
+
+    if let Some(ref auth) = remote.auth {
+        args.push("--auth".to_string());
+        args.push(auth.clone());
+    }
+
+    args.push(url);
 
     // Add reverse tunnel specs: R:<remote_port>:localhost:<local_port>
     for t in tunnels {
@@ -170,6 +173,7 @@ async fn spawn_chisel_client(
         args,
         restart_on_crash: true,
         max_restart_delay: Duration::from_secs(60),
+        env_remove: vec![],
     };
 
     ManagedProcess::spawn_monitored(proc_config, event_tx).await

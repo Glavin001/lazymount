@@ -13,6 +13,7 @@ pub struct ProcessConfig {
     pub args: Vec<String>,
     pub restart_on_crash: bool,
     pub max_restart_delay: Duration,
+    pub env_remove: Vec<String>,
 }
 
 /// Handle to a managed subprocess. Dropping it kills the process.
@@ -132,13 +133,18 @@ async fn spawn_process(config: &ProcessConfig) -> Result<Child> {
         "spawning process"
     );
 
-    let child = Command::new(&config.program)
-        .args(&config.args)
+    let mut cmd = Command::new(&config.program);
+    cmd.args(&config.args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
+        .kill_on_drop(true);
+
+    for var in &config.env_remove {
+        cmd.env_remove(var);
+    }
+
+    let child = cmd.spawn()
         .map_err(|e| {
             LazyMountError::Process(format!(
                 "failed to spawn {} ({}): {e}",
@@ -305,6 +311,7 @@ mod tests {
             args: vec!["hello".to_string()],
             restart_on_crash: true,
             max_restart_delay: Duration::from_secs(60),
+            env_remove: vec![],
         };
 
         assert_eq!(config.name, "test-proc");
@@ -323,6 +330,7 @@ mod tests {
             args: vec!["hello".to_string()],
             restart_on_crash: false,
             max_restart_delay: Duration::from_secs(1),
+            env_remove: vec![],
         };
 
         let proc = ManagedProcess::spawn(config).await.unwrap();
@@ -340,6 +348,7 @@ mod tests {
             args: vec!["hi".to_string()],
             restart_on_crash: false,
             max_restart_delay: Duration::from_secs(1),
+            env_remove: vec![],
         };
 
         let _proc = ManagedProcess::spawn_monitored(config, event_tx).await.unwrap();
@@ -369,6 +378,7 @@ mod tests {
             args: vec![],
             restart_on_crash: false,
             max_restart_delay: Duration::from_secs(1),
+            env_remove: vec![],
         };
 
         let _proc = ManagedProcess::spawn_monitored(config, event_tx).await.unwrap();
@@ -399,6 +409,7 @@ mod tests {
             args: vec!["60".to_string()],
             restart_on_crash: false,
             max_restart_delay: Duration::from_secs(1),
+            env_remove: vec![],
         };
 
         let mut proc = ManagedProcess::spawn(config).await.unwrap();
@@ -419,6 +430,7 @@ mod tests {
             args: vec![],
             restart_on_crash: false,
             max_restart_delay: Duration::from_secs(1),
+            env_remove: vec![],
         };
 
         let result = ManagedProcess::spawn(config).await;
