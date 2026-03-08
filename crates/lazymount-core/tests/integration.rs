@@ -394,9 +394,9 @@ async fn test_end_to_end_rclone_serve_through_chisel_tunnel() {
 
     let test_dir = create_test_files();
 
-    // 1. Start rclone serve sftp on local port
+    // 1. Start rclone serve sftp on local port and wait for it to bind
     let sftp_port: u16 = 19922;
-    let (serve_tx, _serve_rx) = mpsc::channel(64);
+    let (serve_tx, mut serve_rx) = mpsc::channel(64);
     let mut share_manager = lazymount_core::shares::ShareManager::new(sftp_port, serve_tx);
 
     let share = share_manager
@@ -405,7 +405,25 @@ async fn test_end_to_end_rclone_serve_through_chisel_tunnel() {
         .unwrap();
     assert_eq!(share.sftp_port, sftp_port);
 
-    // 2. Start chisel server
+    // Wait for rclone Started event
+    let _ = tokio::time::timeout(Duration::from_secs(5), serve_rx.recv()).await;
+
+    // Poll until rclone is actually listening
+    let mut rclone_ready = false;
+    for _ in 0..20 {
+        if !lazymount_core::process::is_port_available(sftp_port) {
+            rclone_ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        rclone_ready,
+        "rclone sftp should be listening on port {} before starting tunnel",
+        sftp_port,
+    );
+
+    // 2. Start chisel server and wait for it to be ready
     let chisel_port: u16 = 19092;
     let (server_tx, mut server_rx) = mpsc::channel(16);
     let config = lazymount_core::config::ServerConfig {
@@ -426,14 +444,35 @@ async fn test_end_to_end_rclone_serve_through_chisel_tunnel() {
     .await
     .unwrap();
 
-    // Wait for chisel server to bind port
+    // Wait for chisel server Started event
     let _ = tokio::time::timeout(Duration::from_secs(5), server_rx.recv()).await;
+
+    // Poll until chisel server is actually accepting connections
+    let mut server_ready = false;
     for _ in 0..20 {
         if !lazymount_core::process::is_port_available(chisel_port) {
+            server_ready = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    assert!(
+        server_ready,
+        "chisel server should be listening on port {} before starting client",
+        chisel_port,
+    );
+
+    // Verify we can actually TCP connect to chisel server (not just port bound)
+    let server_connectable = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(format!("127.0.0.1:{chisel_port}")),
+    )
+    .await;
+    assert!(
+        matches!(server_connectable, Ok(Ok(_))),
+        "chisel server should accept TCP connections on port {}",
+        chisel_port,
+    );
 
     // 3. Start chisel client with reverse tunnel: remote:tunneled_port -> local:sftp_port
     let tunneled_port: u16 = 19923;
@@ -461,16 +500,57 @@ async fn test_end_to_end_rclone_serve_through_chisel_tunnel() {
     .await
     .unwrap();
 
-    // Wait for tunnel to establish
+    // Wait for client Started event
     let _ = tokio::time::timeout(Duration::from_secs(5), client_rx.recv()).await;
 
+    // Give the chisel client time to negotiate the reverse tunnel with the server.
+    // The Started event fires on spawn, not when the tunnel is established.
+    // Drain a few more events to catch any immediate Exited/Restarting events.
+    let mut client_crashed = false;
+    for _ in 0..5 {
+        match tokio::time::timeout(Duration::from_millis(500), client_rx.recv()).await {
+            Ok(Some(lazymount_core::process::ProcessEvent::Exited { name, exit_code, .. })) => {
+                eprintln!("DIAG: chisel client '{name}' exited with code {exit_code:?}");
+                client_crashed = true;
+            }
+            Ok(Some(lazymount_core::process::ProcessEvent::Restarting { name, attempt, delay, .. })) => {
+                eprintln!("DIAG: chisel client '{name}' restarting (attempt {attempt}, delay {delay:?})");
+                client_crashed = true;
+            }
+            Ok(Some(lazymount_core::process::ProcessEvent::RestartFailed { name, error, .. })) => {
+                panic!("chisel client '{name}' restart failed: {error}");
+            }
+            _ => break, // No more events or timeout — client is stable
+        }
+    }
+
+    if client_crashed {
+        // The client crashed and is restarting — wait for it to reconnect
+        eprintln!("DIAG: waiting for chisel client to reconnect after crash...");
+        // Wait for the next Started event (from restart)
+        let mut reconnected = false;
+        for _ in 0..10 {
+            match tokio::time::timeout(Duration::from_secs(3), client_rx.recv()).await {
+                Ok(Some(lazymount_core::process::ProcessEvent::Started { .. })) => {
+                    reconnected = true;
+                    // Give extra time for tunnel negotiation after reconnect
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    break;
+                }
+                Ok(Some(event)) => {
+                    eprintln!("DIAG: got event while waiting for reconnect: {event:?}");
+                }
+                _ => {}
+            }
+        }
+        assert!(reconnected, "chisel client should have restarted successfully");
+    }
+
     // 4. Verify the tunnel works by making a TCP connection through it.
-    //    Chisel reverse tunnels don't bind a persistent listener — they forward
-    //    on-demand — so we must actually connect to verify.
-    //    The tunneled port forwards to rclone serve sftp, which speaks SSH/SFTP.
-    //    A successful TCP connect + receiving the SSH banner proves the full chain.
+    //    The tunneled port forwards to rclone serve sftp.
+    //    A successful TCP connect proves the full chain works.
     let mut tunnel_works = false;
-    for _ in 0..30 {
+    for attempt in 0..30 {
         match tokio::time::timeout(
             Duration::from_secs(2),
             tokio::net::TcpStream::connect(format!("127.0.0.1:{tunneled_port}")),
@@ -478,15 +558,16 @@ async fn test_end_to_end_rclone_serve_through_chisel_tunnel() {
         .await
         {
             Ok(Ok(stream)) => {
-                // Successful TCP connection through the tunnel
                 drop(stream);
                 tunnel_works = true;
                 break;
             }
-            _ => {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+            Ok(Err(e)) if attempt % 5 == 4 => {
+                eprintln!("DIAG: TCP connect to tunnel port {tunneled_port} failed (attempt {attempt}): {e}");
             }
+            _ => {}
         }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
     assert!(
         tunnel_works,
