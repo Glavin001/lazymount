@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 // Client configuration
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClientConfig {
     #[serde(default)]
     pub daemon: DaemonConfig,
@@ -62,7 +62,7 @@ pub struct ShareConfig {
 // Server configuration
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerConfig {
     #[serde(default)]
     pub server: ServerDaemonConfig,
@@ -125,17 +125,6 @@ fn default_vfs_read_ahead() -> String {
 // Default trait impls
 // ---------------------------------------------------------------------------
 
-impl Default for ClientConfig {
-    fn default() -> Self {
-        Self {
-            daemon: DaemonConfig::default(),
-            cache: CacheConfig::default(),
-            remotes: HashMap::new(),
-            shares: HashMap::new(),
-        }
-    }
-}
-
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
@@ -153,15 +142,6 @@ impl Default for CacheConfig {
             vfs_cache_max_age: default_vfs_cache_max_age(),
             vfs_cache_max_size: default_vfs_cache_max_size(),
             vfs_read_ahead: default_vfs_read_ahead(),
-        }
-    }
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerDaemonConfig::default(),
-            cache: CacheConfig::default(),
         }
     }
 }

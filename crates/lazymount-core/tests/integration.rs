@@ -210,7 +210,7 @@ async fn test_rclone_rc_api_health_check() {
             "sftp",
             &test_dir.path().to_string_lossy(),
             "--addr",
-            &format!("localhost:19622"),
+            "localhost:19622",
             "--no-auth",
             "--vfs-cache-mode",
             "off",
@@ -257,6 +257,17 @@ async fn test_rclone_serve_and_client_e2e() {
         return;
     }
 
+    // Obtain an rclone-obscured dummy password so rclone won't fall back to ssh-agent.
+    // The server runs with --no-auth so the actual value doesn't matter.
+    let obscure_output = std::process::Command::new("rclone")
+        .args(["obscure", "dummy"])
+        .output()
+        .expect("rclone obscure should succeed");
+    let obscured_pass = String::from_utf8(obscure_output.stdout)
+        .expect("valid utf8")
+        .trim()
+        .to_string();
+
     let test_dir = create_test_files();
     let sftp_port: u16 = 19822;
     let (event_tx, mut event_rx) = mpsc::channel(64);
@@ -292,12 +303,12 @@ async fn test_rclone_serve_and_client_e2e() {
             "--sftp-host", "localhost",
             "--sftp-port", &sftp_port.to_string(),
             "--sftp-user", "anonymous",
-            "--sftp-pass", "", // --no-auth on the server
+            "--sftp-pass", &obscured_pass,
             "--no-check-certificate",
             "--sftp-key-use-agent=false",
             "--sftp-shell-type", "none",
         ])
-        .env_remove("SSH_AUTH_SOCK") // Prevent ssh-agent lookup in CI
+        .env_remove("SSH_AUTH_SOCK")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
@@ -325,12 +336,12 @@ async fn test_rclone_serve_and_client_e2e() {
             "--sftp-host", "localhost",
             "--sftp-port", &sftp_port.to_string(),
             "--sftp-user", "anonymous",
-            "--sftp-pass", "",
+            "--sftp-pass", &obscured_pass,
             "--no-check-certificate",
             "--sftp-key-use-agent=false",
             "--sftp-shell-type", "none",
         ])
-        .env_remove("SSH_AUTH_SOCK") // Prevent ssh-agent lookup in CI
+        .env_remove("SSH_AUTH_SOCK")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
@@ -393,10 +404,12 @@ async fn test_chisel_server_starts() {
         other => panic!("expected Started, got {:?}", other),
     }
 
-    // Poll for chisel to bind the port
+    // Poll for chisel to bind the port.
+    // Note: is_port_available (TcpListener::bind) doesn't detect chisel listening
+    // on 0.0.0.0, so we use TcpStream::connect instead.
     let mut bound = false;
     for _ in 0..20 {
-        if !lazymount_core::process::is_port_available(19090) {
+        if std::net::TcpStream::connect(("127.0.0.1", 19090u16)).is_ok() {
             bound = true;
             break;
         }
@@ -440,7 +453,7 @@ async fn test_chisel_client_connects_to_server() {
     // Wait for server to start and bind port
     let _ = tokio::time::timeout(Duration::from_secs(5), server_rx.recv()).await;
     for _ in 0..20 {
-        if !lazymount_core::process::is_port_available(19091) {
+        if std::net::TcpStream::connect(("127.0.0.1", 19091u16)).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -555,10 +568,12 @@ async fn test_end_to_end_rclone_serve_through_chisel_tunnel() {
     // Wait for chisel server Started event
     let _ = tokio::time::timeout(Duration::from_secs(5), server_rx.recv()).await;
 
-    // Poll until chisel server is actually accepting connections
+    // Poll until chisel server is actually accepting connections.
+    // Use TcpStream::connect since chisel binds to 0.0.0.0 which
+    // TcpListener::bind("127.0.0.1", port) won't detect.
     let mut server_ready = false;
     for _ in 0..20 {
-        if !lazymount_core::process::is_port_available(chisel_port) {
+        if std::net::TcpStream::connect(("127.0.0.1", chisel_port)).is_ok() {
             server_ready = true;
             break;
         }
