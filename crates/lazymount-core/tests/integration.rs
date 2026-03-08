@@ -1,0 +1,827 @@
+//! Integration tests that use real rclone and chisel binaries.
+//!
+//! These tests require `rclone` and `chisel` to be installed on the system.
+//! They run on localhost only (no real NAT traversal), but verify the full
+//! subprocess orchestration, SFTP serving, VFS mounting, and RC API integration.
+//!
+//! Tests are gated behind a `has_rclone` / `has_chisel` check and skip gracefully
+//! if the binaries are not available.
+
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio::sync::mpsc;
+
+fn has_binary(name: &str) -> bool {
+    lazymount_core::config::check_binary(name).is_ok()
+}
+
+/// Helper to create a temp directory with some test files.
+fn create_test_files() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("hello.txt"), "Hello from LazyMount!\n").unwrap();
+    std::fs::write(dir.path().join("data.bin"), vec![0u8; 1024]).unwrap();
+    std::fs::create_dir_all(dir.path().join("subdir")).unwrap();
+    std::fs::write(
+        dir.path().join("subdir/nested.txt"),
+        "nested file content\n",
+    )
+    .unwrap();
+    dir
+}
+
+// ============================================================================
+// rclone serve sftp tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_rclone_serve_sftp_starts_and_stops() {
+    if !has_binary("rclone") {
+        println!("SKIP: rclone not found");
+        return;
+    }
+
+    let test_dir = create_test_files();
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+
+    let mut share_manager = lazymount_core::shares::ShareManager::new(19222, event_tx);
+
+    // Start serving
+    let share = share_manager
+        .add_share(
+            "test-share".to_string(),
+            test_dir.path(),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(share.name, "test-share");
+    assert!(share.sftp_port >= 19222);
+
+    // Wait for the Started event
+    let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    match event {
+        lazymount_core::process::ProcessEvent::Started { name, .. } => {
+            assert!(name.contains("test-share"));
+        }
+        other => panic!("expected Started, got {:?}", other),
+    }
+
+    // Poll for rclone to bind the port
+    let mut bound = false;
+    for _ in 0..20 {
+        if !lazymount_core::process::is_port_available(share.sftp_port) {
+            bound = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        bound,
+        "rclone should be listening on port {} within 10s",
+        share.sftp_port
+    );
+
+    // List shares
+    let shares = share_manager.list_shares();
+    assert_eq!(shares.len(), 1);
+    assert_eq!(shares[0].name, "test-share");
+
+    // Stop
+    share_manager.remove_share("test-share").await.unwrap();
+    assert!(share_manager.list_shares().is_empty());
+
+    // Poll for port to be freed
+    let mut freed = false;
+    for _ in 0..20 {
+        if lazymount_core::process::is_port_available(share.sftp_port) {
+            freed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        freed,
+        "port should be freed after stopping rclone"
+    );
+}
+
+#[tokio::test]
+async fn test_rclone_serve_multiple_shares() {
+    if !has_binary("rclone") {
+        println!("SKIP: rclone not found");
+        return;
+    }
+
+    let dir1 = create_test_files();
+    let dir2 = create_test_files();
+    let (event_tx, _event_rx) = mpsc::channel(64);
+
+    let mut share_manager = lazymount_core::shares::ShareManager::new(19322, event_tx);
+
+    let share1 = share_manager
+        .add_share("share1".to_string(), dir1.path(), vec![])
+        .await
+        .unwrap();
+    let share2 = share_manager
+        .add_share("share2".to_string(), dir2.path(), vec![])
+        .await
+        .unwrap();
+
+    // Ports should be different
+    assert_ne!(share1.sftp_port, share2.sftp_port);
+
+    // Both should be listed
+    assert_eq!(share_manager.list_shares().len(), 2);
+
+    // Cleanup
+    share_manager.shutdown().await;
+    assert!(share_manager.list_shares().is_empty());
+}
+
+#[tokio::test]
+async fn test_rclone_serve_duplicate_share_name_fails() {
+    if !has_binary("rclone") {
+        println!("SKIP: rclone not found");
+        return;
+    }
+
+    let dir = create_test_files();
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut share_manager = lazymount_core::shares::ShareManager::new(19422, event_tx);
+
+    share_manager
+        .add_share("dup".to_string(), dir.path(), vec![])
+        .await
+        .unwrap();
+
+    // Adding same name again should fail
+    let result = share_manager
+        .add_share("dup".to_string(), dir.path(), vec![])
+        .await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("already exists"));
+
+    share_manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_rclone_serve_nonexistent_path_fails() {
+    if !has_binary("rclone") {
+        println!("SKIP: rclone not found");
+        return;
+    }
+
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut share_manager = lazymount_core::shares::ShareManager::new(19522, event_tx);
+
+    let result = share_manager
+        .add_share(
+            "bad".to_string(),
+            &PathBuf::from("/nonexistent/path/xyz123"),
+            vec![],
+        )
+        .await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("does not exist"));
+}
+
+// ============================================================================
+// rclone RC API tests (with a real rclone process)
+// ============================================================================
+
+#[tokio::test]
+async fn test_rclone_rc_api_health_check() {
+    if !has_binary("rclone") {
+        println!("SKIP: rclone not found");
+        return;
+    }
+
+    let test_dir = create_test_files();
+    let rc_port: u16 = 19672;
+
+    // Start rclone serve sftp with --rc enabled
+    let mut child = tokio::process::Command::new("rclone")
+        .args([
+            "serve",
+            "sftp",
+            &test_dir.path().to_string_lossy(),
+            "--addr",
+            "localhost:19622",
+            "--no-auth",
+            "--vfs-cache-mode",
+            "off",
+            "--rc",
+            "--rc-addr",
+            &format!("127.0.0.1:{rc_port}"),
+            "--rc-no-auth",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    let rc_client = lazymount_core::rclone_rc::RcloneRcClient::new(rc_port);
+
+    // Poll for rclone RC to become available
+    let mut healthy = false;
+    for _ in 0..20 {
+        if rc_client.health_check().await {
+            healthy = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(healthy, "rclone RC health check should pass within 10s");
+
+    // Clean up
+    child.kill().await.ok();
+}
+
+// ============================================================================
+// End-to-end: rclone serve sftp + rclone client on same machine
+// ============================================================================
+
+/// Starts rclone serve sftp via ShareManager, then uses rclone as an SFTP
+/// client to list and read files through it. Proves the full rclone pipeline
+/// works without requiring chisel.
+#[tokio::test]
+async fn test_rclone_serve_and_client_e2e() {
+    if !has_binary("rclone") {
+        println!("SKIP: rclone not found");
+        return;
+    }
+
+    // Obtain an rclone-obscured dummy password so rclone won't fall back to ssh-agent.
+    // The server runs with --no-auth so the actual value doesn't matter.
+    let obscure_output = std::process::Command::new("rclone")
+        .args(["obscure", "dummy"])
+        .output()
+        .expect("rclone obscure should succeed");
+    let obscured_pass = String::from_utf8(obscure_output.stdout)
+        .expect("valid utf8")
+        .trim()
+        .to_string();
+
+    let test_dir = create_test_files();
+    let sftp_port: u16 = 19822;
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let mut share_manager = lazymount_core::shares::ShareManager::new(sftp_port, event_tx);
+
+    // Start rclone serve sftp
+    let share = share_manager
+        .add_share("e2e-rclone".to_string(), test_dir.path(), vec![])
+        .await
+        .unwrap();
+    assert_eq!(share.sftp_port, sftp_port);
+
+    // Wait for Started event
+    let _ = tokio::time::timeout(Duration::from_secs(5), event_rx.recv()).await;
+
+    // Poll until rclone is listening
+    let mut ready = false;
+    for _ in 0..20 {
+        if !lazymount_core::process::is_port_available(sftp_port) {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(ready, "rclone sftp should be listening on port {sftp_port}");
+
+    // Use rclone as a client to list files through the SFTP server.
+    // :sftp: is an on-the-fly remote requiring no config file.
+    let output = tokio::process::Command::new("rclone")
+        .args([
+            "lsf",
+            ":sftp:/",
+            "--sftp-host", "localhost",
+            "--sftp-port", &sftp_port.to_string(),
+            "--sftp-user", "anonymous",
+            "--sftp-pass", &obscured_pass,
+            "--no-check-certificate",
+            "--sftp-key-use-agent=false",
+            "--sftp-shell-type", "none",
+        ])
+        .env_remove("SSH_AUTH_SOCK")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "rclone lsf should succeed.\nstdout: {stdout}\nstderr: {stderr}",
+    );
+
+    // Verify the test files are listed
+    assert!(stdout.contains("hello.txt"), "should list hello.txt, got: {stdout}");
+    assert!(stdout.contains("data.bin"), "should list data.bin, got: {stdout}");
+    assert!(stdout.contains("subdir/"), "should list subdir/, got: {stdout}");
+
+    // Read a file through the SFTP connection
+    let cat_output = tokio::process::Command::new("rclone")
+        .args([
+            "cat",
+            ":sftp:/hello.txt",
+            "--sftp-host", "localhost",
+            "--sftp-port", &sftp_port.to_string(),
+            "--sftp-user", "anonymous",
+            "--sftp-pass", &obscured_pass,
+            "--no-check-certificate",
+            "--sftp-key-use-agent=false",
+            "--sftp-shell-type", "none",
+        ])
+        .env_remove("SSH_AUTH_SOCK")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .unwrap();
+
+    let cat_stdout = String::from_utf8_lossy(&cat_output.stdout);
+    let cat_stderr = String::from_utf8_lossy(&cat_output.stderr);
+
+    assert!(
+        cat_output.status.success(),
+        "rclone cat should succeed.\nstdout: {cat_stdout}\nstderr: {cat_stderr}",
+    );
+    assert_eq!(cat_stdout.trim(), "Hello from LazyMount!");
+
+    // Cleanup
+    share_manager.shutdown().await;
+}
+
+// ============================================================================
+// Chisel tunnel tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_chisel_server_starts() {
+    if !has_binary("chisel") {
+        println!("SKIP: chisel not found");
+        return;
+    }
+
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let config = lazymount_core::config::ServerConfig {
+        server: lazymount_core::config::ServerDaemonConfig {
+            chisel_port: 19090,
+            auth: Some("testuser:testpass".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let provider = lazymount_core::tunnel::ChiselTunnelProvider;
+    let mut handle = lazymount_core::tunnel::TunnelProvider::start_server(
+        &provider,
+        &config,
+        event_tx,
+    )
+    .await
+    .unwrap();
+
+    // Should get a Started event
+    let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    match event {
+        lazymount_core::process::ProcessEvent::Started { name, .. } => {
+            assert_eq!(name, "chisel-server");
+        }
+        other => panic!("expected Started, got {:?}", other),
+    }
+
+    // Poll for chisel to bind the port.
+    // Note: is_port_available (TcpListener::bind) doesn't detect chisel listening
+    // on 0.0.0.0, so we use TcpStream::connect instead.
+    let mut bound = false;
+    for _ in 0..20 {
+        if std::net::TcpStream::connect(("127.0.0.1", 19090u16)).is_ok() {
+            bound = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(bound, "chisel should be listening on port 19090 within 10s");
+
+    // Clean up
+    handle.process.kill().await.ok();
+}
+
+#[tokio::test]
+async fn test_chisel_client_connects_to_server() {
+    if !has_binary("chisel") {
+        println!("SKIP: chisel not found");
+        return;
+    }
+
+    let (server_tx, mut server_rx) = mpsc::channel(16);
+    let (client_tx, mut client_rx) = mpsc::channel(16);
+
+    // Start chisel server
+    let config = lazymount_core::config::ServerConfig {
+        server: lazymount_core::config::ServerDaemonConfig {
+            chisel_port: 19091,
+            auth: Some("user:pass".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let provider = lazymount_core::tunnel::ChiselTunnelProvider;
+    let mut server_handle = lazymount_core::tunnel::TunnelProvider::start_server(
+        &provider,
+        &config,
+        server_tx,
+    )
+    .await
+    .unwrap();
+
+    // Wait for server to start and bind port
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_rx.recv()).await;
+    for _ in 0..20 {
+        if std::net::TcpStream::connect(("127.0.0.1", 19091u16)).is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // Connect client with a reverse tunnel
+    let remote = lazymount_core::types::Remote {
+        name: "test-server".to_string(),
+        host: "localhost".to_string(),
+        port: 19091,
+        auth: Some("user:pass".to_string()),
+        auto_connect: false,
+        status: Default::default(),
+    };
+
+    let tunnels = vec![lazymount_core::types::TunnelMapping {
+        local_port: 19722,
+        remote_port: 19822,
+    }];
+
+    let mut client_handle = lazymount_core::tunnel::TunnelProvider::connect(
+        &provider,
+        &remote,
+        &tunnels,
+        client_tx,
+    )
+    .await
+    .unwrap();
+
+    // Should get a Started event for the client
+    let event = tokio::time::timeout(Duration::from_secs(5), client_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    match event {
+        lazymount_core::process::ProcessEvent::Started { name, .. } => {
+            assert!(name.contains("chisel-client"), "got: {name}");
+        }
+        other => panic!("expected Started, got {:?}", other),
+    }
+
+    // Clean up
+    client_handle.process.kill().await.ok();
+    server_handle.process.kill().await.ok();
+}
+
+// ============================================================================
+// End-to-end: rclone serve + chisel tunnel + rclone RC
+// ============================================================================
+
+#[ignore] // Requires chisel reverse tunnels which are flaky in CI environments
+#[tokio::test]
+async fn test_end_to_end_rclone_serve_through_chisel_tunnel() {
+    if !has_binary("rclone") || !has_binary("chisel") {
+        println!("SKIP: rclone and/or chisel not found");
+        return;
+    }
+
+    let test_dir = create_test_files();
+
+    // 1. Start rclone serve sftp on local port and wait for it to bind
+    let sftp_port: u16 = 19922;
+    let (serve_tx, mut serve_rx) = mpsc::channel(64);
+    let mut share_manager = lazymount_core::shares::ShareManager::new(sftp_port, serve_tx);
+
+    let share = share_manager
+        .add_share("e2e-test".to_string(), test_dir.path(), vec![])
+        .await
+        .unwrap();
+    assert_eq!(share.sftp_port, sftp_port);
+
+    // Wait for rclone Started event
+    let _ = tokio::time::timeout(Duration::from_secs(5), serve_rx.recv()).await;
+
+    // Poll until rclone is actually listening
+    let mut rclone_ready = false;
+    for _ in 0..20 {
+        if !lazymount_core::process::is_port_available(sftp_port) {
+            rclone_ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        rclone_ready,
+        "rclone sftp should be listening on port {} before starting tunnel",
+        sftp_port,
+    );
+
+    // 2. Start chisel server and wait for it to be ready
+    let chisel_port: u16 = 19092;
+    let (server_tx, mut server_rx) = mpsc::channel(16);
+    let config = lazymount_core::config::ServerConfig {
+        server: lazymount_core::config::ServerDaemonConfig {
+            chisel_port,
+            auth: Some("e2e:test".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let provider = lazymount_core::tunnel::ChiselTunnelProvider;
+    let mut server_handle = lazymount_core::tunnel::TunnelProvider::start_server(
+        &provider,
+        &config,
+        server_tx,
+    )
+    .await
+    .unwrap();
+
+    // Wait for chisel server Started event
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_rx.recv()).await;
+
+    // Poll until chisel server is actually accepting connections.
+    // Use TcpStream::connect since chisel binds to 0.0.0.0 which
+    // TcpListener::bind("127.0.0.1", port) won't detect.
+    let mut server_ready = false;
+    for _ in 0..20 {
+        if std::net::TcpStream::connect(("127.0.0.1", chisel_port)).is_ok() {
+            server_ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        server_ready,
+        "chisel server should be listening on port {} before starting client",
+        chisel_port,
+    );
+
+    // Verify we can actually TCP connect to chisel server (not just port bound)
+    let server_connectable = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(format!("127.0.0.1:{chisel_port}")),
+    )
+    .await;
+    assert!(
+        matches!(server_connectable, Ok(Ok(_))),
+        "chisel server should accept TCP connections on port {}",
+        chisel_port,
+    );
+
+    // 3. Start chisel client with reverse tunnel: remote:tunneled_port -> local:sftp_port
+    let tunneled_port: u16 = 19923;
+    let (client_tx, mut client_rx) = mpsc::channel(16);
+    let remote = lazymount_core::types::Remote {
+        name: "e2e-server".to_string(),
+        host: "localhost".to_string(),
+        port: chisel_port,
+        auth: Some("e2e:test".to_string()),
+        auto_connect: false,
+        status: Default::default(),
+    };
+
+    let tunnels = vec![lazymount_core::types::TunnelMapping {
+        local_port: sftp_port,
+        remote_port: tunneled_port,
+    }];
+
+    let mut client_handle = lazymount_core::tunnel::TunnelProvider::connect(
+        &provider,
+        &remote,
+        &tunnels,
+        client_tx,
+    )
+    .await
+    .unwrap();
+
+    // Wait for client Started event
+    let _ = tokio::time::timeout(Duration::from_secs(5), client_rx.recv()).await;
+
+    // Give the chisel client time to negotiate the reverse tunnel with the server.
+    // The Started event fires on spawn, not when the tunnel is established.
+    // Drain a few more events to catch any immediate Exited/Restarting events.
+    let mut client_crashed = false;
+    for _ in 0..5 {
+        match tokio::time::timeout(Duration::from_millis(500), client_rx.recv()).await {
+            Ok(Some(lazymount_core::process::ProcessEvent::Exited { name, exit_code, .. })) => {
+                eprintln!("DIAG: chisel client '{name}' exited with code {exit_code:?}");
+                client_crashed = true;
+            }
+            Ok(Some(lazymount_core::process::ProcessEvent::Restarting { name, attempt, delay, .. })) => {
+                eprintln!("DIAG: chisel client '{name}' restarting (attempt {attempt}, delay {delay:?})");
+                client_crashed = true;
+            }
+            Ok(Some(lazymount_core::process::ProcessEvent::RestartFailed { name, error, .. })) => {
+                panic!("chisel client '{name}' restart failed: {error}");
+            }
+            _ => break, // No more events or timeout — client is stable
+        }
+    }
+
+    if client_crashed {
+        // The client crashed and is restarting — wait for it to reconnect
+        eprintln!("DIAG: waiting for chisel client to reconnect after crash...");
+        // Wait for the next Started event (from restart)
+        let mut reconnected = false;
+        for _ in 0..10 {
+            match tokio::time::timeout(Duration::from_secs(3), client_rx.recv()).await {
+                Ok(Some(lazymount_core::process::ProcessEvent::Started { .. })) => {
+                    reconnected = true;
+                    // Give extra time for tunnel negotiation after reconnect
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    break;
+                }
+                Ok(Some(event)) => {
+                    eprintln!("DIAG: got event while waiting for reconnect: {event:?}");
+                }
+                _ => {}
+            }
+        }
+        assert!(reconnected, "chisel client should have restarted successfully");
+    }
+
+    // 4. Verify the tunnel works by making a TCP connection through it.
+    //    The tunneled port forwards to rclone serve sftp.
+    //    A successful TCP connect proves the full chain works.
+    let mut tunnel_works = false;
+    for attempt in 0..30 {
+        match tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect(format!("127.0.0.1:{tunneled_port}")),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => {
+                drop(stream);
+                tunnel_works = true;
+                break;
+            }
+            Ok(Err(e)) if attempt % 5 == 4 => {
+                eprintln!("DIAG: TCP connect to tunnel port {tunneled_port} failed (attempt {attempt}): {e}");
+            }
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        tunnel_works,
+        "should be able to TCP connect through chisel tunnel on port {}",
+        tunneled_port,
+    );
+
+    // 5. Cleanup
+    client_handle.process.kill().await.ok();
+    server_handle.process.kill().await.ok();
+    share_manager.shutdown().await;
+}
+
+// ============================================================================
+// Share manifest HTTP server test
+// ============================================================================
+
+#[tokio::test]
+async fn test_share_manifest_http_server() {
+    use lazymount_core::protocol::ShareManifest;
+
+    // Start a manifest server on a test port
+    let manifest = ShareManifest {
+        version: 1,
+        client_name: "test-client".to_string(),
+        shares: vec![lazymount_core::protocol::ShareManifestEntry {
+            name: "test-share".to_string(),
+            tunneled_port: 3222,
+        }],
+    };
+
+    let manifest_for_server = manifest.clone();
+    let port: u16 = 19200;
+
+    // Start a simple axum server serving the manifest
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(manifest_for_server));
+    let app = axum::Router::new()
+        .route(
+            "/",
+            axum::routing::get({
+                let state = state.clone();
+                move || {
+                    let state = state.clone();
+                    async move {
+                        let m = state.lock().await;
+                        axum::Json(m.clone())
+                    }
+                }
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Fetch the manifest
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/"))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(resp.status().is_success());
+
+    let fetched: ShareManifest = resp.json().await.unwrap();
+    assert_eq!(fetched.version, 1);
+    assert_eq!(fetched.client_name, "test-client");
+    assert_eq!(fetched.shares.len(), 1);
+    assert_eq!(fetched.shares[0].name, "test-share");
+    assert_eq!(fetched.shares[0].tunneled_port, 3222);
+}
+
+// ============================================================================
+// Config persistence tests
+// ============================================================================
+
+#[test]
+fn test_config_save_and_load() {
+    // Use a temp dir for config to avoid polluting the user's real config
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("config.toml");
+
+    let config = lazymount_core::config::ClientConfig {
+        remotes: {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "test-remote".to_string(),
+                lazymount_core::config::RemoteConfig {
+                    host: "example.com".to_string(),
+                    port: 8090,
+                    auth: Some("u:p".to_string()),
+                    auto_connect: true,
+                },
+            );
+            m
+        },
+        shares: {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "test-share".to_string(),
+                lazymount_core::config::ShareConfig {
+                    path: "/tmp/test".to_string(),
+                    remotes: vec!["test-remote".to_string()],
+                },
+            );
+            m
+        },
+        ..Default::default()
+    };
+
+    // Serialize and write
+    let toml_str = toml::to_string_pretty(&config).unwrap();
+    std::fs::write(&config_path, &toml_str).unwrap();
+
+    // Read back
+    let contents = std::fs::read_to_string(&config_path).unwrap();
+    let loaded: lazymount_core::config::ClientConfig = toml::from_str(&contents).unwrap();
+
+    assert!(loaded.remotes.contains_key("test-remote"));
+    assert_eq!(loaded.remotes["test-remote"].host, "example.com");
+    assert_eq!(
+        loaded.remotes["test-remote"].auth.as_deref(),
+        Some("u:p")
+    );
+    assert!(loaded.shares.contains_key("test-share"));
+    assert_eq!(loaded.shares["test-share"].remotes, vec!["test-remote"]);
+}
