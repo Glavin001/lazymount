@@ -1,0 +1,30 @@
+# CI variant: uses a pre-built Linux binary instead of building from source.
+# The build context is the repo root (same as Dockerfile).
+# Requires: target/release/lazymount to exist before `docker compose build`.
+
+FROM golang:latest AS chisel-builder
+RUN CGO_ENABLED=0 go install github.com/jpillora/chisel@latest
+
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    unzip \
+    fuse3 && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://rclone.org/install.sh | bash
+
+COPY --from=chisel-builder /go/bin/chisel /usr/local/bin/chisel
+
+# Copy the pre-built binary (must exist at target/release/lazymount in build context)
+COPY target/release/lazymount /usr/local/bin/lazymount
+
+RUN ln -sf /usr/bin/fusermount3 /usr/local/bin/fusermount
+
+RUN chisel --version && rclone version && lazymount --help >/dev/null
+
+EXPOSE 8090
+CMD ["lazymount", "server", "start", "--port", "8090", "--auth", "demo:secret"]

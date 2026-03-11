@@ -1,0 +1,23 @@
+services:
+  lazymount-server:
+    build:
+      context: ..
+      # Local dev: demo/Dockerfile (builds from source)
+      # CI: LAZYMOUNT_DOCKERFILE=demo/Dockerfile.ci (copies pre-built binary)
+      dockerfile: ${LAZYMOUNT_DOCKERFILE:-demo/Dockerfile}
+    ports:
+      # Chisel tunnel server - Mac client connects here
+      - "8090:8090"
+    # Required for FUSE mounts (rclone mount inside the container)
+    privileged: true
+    command:
+      - lazymount
+      - server
+      - start
+      - --port
+      - "8090"
+      - --auth
+      - "demo:secret"
+    # Keep stdin open so Ctrl+C propagates cleanly
+    stdin_open: true
+    tty: true

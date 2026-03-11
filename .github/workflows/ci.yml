@@ -9,6 +9,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 1: unit tests + clippy + build the Linux release binary for downstream jobs
+  # ────────────────────────────────────────────────────────────────────────────
   test:
     name: Build & Test
     runs-on: ubuntu-latest
@@ -33,8 +36,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install rclone
-        run: |
-          curl -fsSL https://rclone.org/install.sh | sudo bash
+        run: curl -fsSL https://rclone.org/install.sh | sudo bash
 
       - name: Install chisel
         run: |
@@ -44,14 +46,12 @@ jobs:
           sudo mv /tmp/chisel /usr/local/bin/chisel
 
       - name: Verify dependencies
-        run: |
-          rclone version
-          chisel --version
+        run: rclone version && chisel --version
 
-      - name: Build
+      - name: Build (debug, all targets)
         run: cargo build --all-targets
 
-      - name: Run tests
+      - name: Run unit & integration tests
         run: cargo test -- --test-threads=1
         env:
           SSH_AUTH_SOCK: ""
@@ -59,6 +59,72 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Build the Linux release binary and share it with the e2e job.
+      # Uses the same cargo cache warmed up by the debug build above,
+      # so this is an incremental compile, not a full rebuild.
+      - name: Build Linux release binary
+        run: cargo build --release -p lazymount-cli
+
+      - name: Upload Linux release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: lazymount-linux-x86_64-ci
+          path: target/release/lazymount
+          retention-days: 1   # only needed for the e2e job in this run
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 2: end-to-end tests
+  #   - Docker container = "remote server"  (lazymount server start)
+  #   - ubuntu runner    = "local machine"  (lazymount daemon + share)
+  #   - Uses the binary from the test job (no second build)
+  # ────────────────────────────────────────────────────────────────────────────
+  e2e:
+    name: End-to-End Tests
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: lazymount-linux-x86_64-ci
+          path: target/release/
+
+      - name: Make binary executable
+        run: chmod +x target/release/lazymount
+
+      - name: Install rclone
+        run: curl -fsSL https://rclone.org/install.sh | sudo bash
+
+      - name: Install chisel
+        run: |
+          CHISEL_VERSION=$(curl -fsSL https://api.github.com/repos/jpillora/chisel/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+          curl -fsSL "https://github.com/jpillora/chisel/releases/download/v${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_amd64.gz" | gunzip > /tmp/chisel
+          chmod +x /tmp/chisel
+          sudo mv /tmp/chisel /usr/local/bin/chisel
+
+      - name: Run E2E tests
+        run: |
+          chmod +x demo/e2e-test.sh
+          LAZYMOUNT_BIN=./target/release/lazymount \
+          LAZYMOUNT_DOCKERFILE=demo/Dockerfile.ci \
+          demo/e2e-test.sh
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - name: Upload daemon log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-daemon-log
+          path: /tmp/lazymount-e2e-daemon.log
+          if-no-files-found: ignore
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 3: multi-platform release binaries (runs in parallel with e2e)
+  # ────────────────────────────────────────────────────────────────────────────
   build:
     name: Build (${{ matrix.target }})
     needs: test
